@@ -10,17 +10,24 @@ struct ContentView: View {
         ZStack {
             background.ignoresSafeArea()
 
-            ScrollView {
-                ViewThatFits(in: .horizontal) {
-                    wideContent
-                    compactContent
+            GeometryReader { proxy in
+                ScrollView {
+                    ViewThatFits(in: .horizontal) {
+                        wideContent
+                        compactContent
+                    }
+                    .padding(.horizontal, 24)
+                    .padding(.vertical, 28)
+                    // Centre the game vertically on large screens (iPad) instead of
+                    // leaving it pinned to the top of an otherwise empty canvas.
+                    .frame(maxWidth: .infinity, minHeight: proxy.size.height, alignment: .center)
                 }
-                .padding(.horizontal, 24)
-                .padding(.vertical, 28)
-                .frame(maxWidth: .infinity)
             }
         }
-        .sensoryFeedback(.impact(weight: .light), trigger: game.moveCount)
+        .sensoryFeedback(.impact(weight: .light), trigger: game.moveCount) { oldValue, newValue in
+            // Only buzz for a placed mark, not when a new round clears the board.
+            newValue > oldValue
+        }
     }
 
     private var compactContent: some View {
@@ -130,13 +137,14 @@ struct ContentView: View {
         .padding(14)
         .background(.ultraThinMaterial, in: RoundedRectangle(cornerRadius: 28, style: .continuous))
         .shadow(color: .black.opacity(colorScheme == .dark ? 0.28 : 0.12), radius: 24, y: 12)
+        .animation(.spring(response: 0.3, dampingFraction: 0.72), value: game.moveCount)
         .accessibilityElement(children: .contain)
         .accessibilityLabel("Game board")
     }
 
     private func cell(at index: Int) -> some View {
         let mark = game.board[index]
-        let isWinner = game.winningLine.contains(index)
+        let isWinner = game.winningCells.contains(index)
         let row = index / 3 + 1
         let column = index % 3 + 1
 
@@ -159,9 +167,15 @@ struct ContentView: View {
             .aspectRatio(1, contentMode: .fit)
         }
         .buttonStyle(.plain)
-        .disabled(mark != nil || game.winner != nil || game.isDraw)
+        .disabled(mark != nil || game.winner != nil || game.isDraw || game.isComputerThinking)
         .accessibilityLabel("Row \(row), column \(column), \(mark?.rawValue ?? "empty")")
-        .accessibilityHint(mark == nil ? "Places \(game.currentTurn.rawValue)" : "")
+        .accessibilityHint(cellHint(for: mark))
+    }
+
+    private func cellHint(for mark: Mark?) -> String {
+        guard mark == nil, game.winner == nil, !game.isDraw else { return "" }
+        if game.mode == .computer && game.isComputerThinking { return "Computer is thinking" }
+        return "Places \(game.currentTurn.rawValue)"
     }
 
     private var footer: some View {

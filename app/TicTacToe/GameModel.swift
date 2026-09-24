@@ -30,13 +30,19 @@ enum GameRules {
         [0, 4, 8], [2, 4, 6]
     ]
 
-    static func winningLine(in board: [Mark?]) -> [Int]? {
-        guard board.count == 9 else { return nil }
+    /// Every completed line on the board, in `winningLines` order.
+    /// A single move can complete two lines at once, so this can hold more than one entry.
+    static func completedLines(in board: [Mark?]) -> [[Int]] {
+        guard board.count == 9 else { return [] }
 
-        return winningLines.first { line in
+        return winningLines.filter { line in
             guard let first = board[line[0]] else { return false }
             return board[line[1]] == first && board[line[2]] == first
         }
+    }
+
+    static func winningLine(in board: [Mark?]) -> [Int]? {
+        completedLines(in: board).first
     }
 
     static func winner(in board: [Mark?]) -> Mark? {
@@ -45,7 +51,8 @@ enum GameRules {
     }
 
     static func isDraw(_ board: [Mark?]) -> Bool {
-        board.allSatisfy { $0 != nil } && winner(in: board) == nil
+        guard board.count == 9 else { return false }
+        return board.allSatisfy { $0 != nil } && winner(in: board) == nil
     }
 }
 
@@ -108,21 +115,40 @@ final class GameModel: ObservableObject {
     @Published private(set) var currentTurn: Mark = .x
     @Published private(set) var winner: Mark?
     @Published private(set) var isDraw = false
-    @Published private(set) var winningLine: [Int] = []
+    /// Every board cell that is part of a completed winning line. Holds more than
+    /// three indices when one move completes two lines at once.
+    @Published private(set) var winningCells: [Int] = []
+    @Published private(set) var isComputerThinking = false
     @Published private(set) var xScore = 0
     @Published private(set) var oScore = 0
     @Published private(set) var draws = 0
 
     @Published var difficulty: Difficulty = .unbeatable
     @Published var mode: GameMode = .computer {
-        didSet { resetMatch() }
+        didSet {
+            guard oldValue != mode else { return }
+            // Scores belong to the match, not the mode, so keep them and only
+            // clear the board (which also cancels a pending computer move).
+            newRound()
+        }
+    }
+
+    /// How long the computer appears to think before playing. Injectable so
+    /// tests can run without waiting.
+    private let computerMoveDelay: Duration
+    private var computerMoveTask: Task<Void, Never>?
+
+    init(computerMoveDelay: Duration = .milliseconds(450)) {
+        self.computerMoveDelay = computerMoveDelay
     }
 
     var moveCount: Int { board.compactMap { $0 }.count }
 
     var statusText: String {
         if let winner {
-            if mode == .computer && winner == .o { return "Computer wins" }
+            if mode == .computer {
+                return winner == .x ? "You win" : "Computer wins"
+            }
             return "\(winner.rawValue) wins"
         }
         if isDraw { return "A thoughtful draw" }
@@ -133,21 +159,29 @@ final class GameModel: ObservableObject {
     }
 
     func play(at index: Int) {
-        guard board.indices.contains(index), board[index] == nil, winner == nil, !isDraw else { return }
+        guard !isComputerThinking,
+              board.indices.contains(index),
+              board[index] == nil,
+              winner == nil,
+              !isDraw else { return }
         if mode == .computer && currentTurn == .o { return }
 
         place(currentTurn, at: index)
         if mode == .computer && winner == nil && !isDraw {
-            makeComputerMove()
+            scheduleComputerMove()
         }
     }
 
     func newRound() {
+        computerMoveTask?.cancel()
+        computerMoveTask = nil
+        isComputerThinking = false
+
         board = Array(repeating: nil, count: 9)
         currentTurn = .x
         winner = nil
         isDraw = false
-        winningLine = []
+        winningCells = []
     }
 
     func resetMatch() {
@@ -160,15 +194,33 @@ final class GameModel: ObservableObject {
     private func place(_ mark: Mark, at index: Int) {
         board[index] = mark
 
-        if let line = GameRules.winningLine(in: board) {
+        let completedLines = GameRules.completedLines(in: board)
+        if !completedLines.isEmpty {
             winner = mark
-            winningLine = line
+            winningCells = Set(completedLines.flatMap { $0 }).sorted()
             if mark == .x { xScore += 1 } else { oScore += 1 }
         } else if GameRules.isDraw(board) {
             isDraw = true
             draws += 1
         } else {
             currentTurn = mark.opponent
+        }
+    }
+
+    /// Gives the computer a visible turn: the move lands after `computerMoveDelay`
+    /// so the "Computer is thinking" status can render and the move animates on its own.
+    private func scheduleComputerMove() {
+        computerMoveTask?.cancel()
+        isComputerThinking = true
+
+        computerMoveTask = Task { [weak self] in
+            guard let self else { return }
+            try? await Task.sleep(for: self.computerMoveDelay)
+            guard !Task.isCancelled else { return }
+
+            self.isComputerThinking = false
+            self.computerMoveTask = nil
+            self.makeComputerMove()
         }
     }
 

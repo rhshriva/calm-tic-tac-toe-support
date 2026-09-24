@@ -72,6 +72,16 @@ final class GameRulesTests: XCTestCase {
         XCTAssertNil(MinimaxAI.bestMove(for: .o, on: longBoard))
     }
 
+    func testIsDrawIsFalseForMalformedBoards() {
+        // A short board that is actually a win must never be reported as a draw.
+        XCTAssertFalse(GameRules.isDraw([.x, .x, .x]))
+        XCTAssertFalse(GameRules.isDraw([nil, nil, nil]))
+        XCTAssertFalse(GameRules.isDraw(Array(repeating: .x, count: 10)))
+
+        // The genuine nine-cell draw still reports true.
+        XCTAssertTrue(GameRules.isDraw([.x, .o, .x, .x, .o, .o, .o, .x, .x]))
+    }
+
     func testAIReturnsNilAfterGameHasBeenWon() {
         let board: [Mark?] = [.x, .x, .x, .o, .o, nil, nil, nil, nil]
 
@@ -112,7 +122,7 @@ final class GameRulesTests: XCTestCase {
         [0, 3, 1, 4, 2].forEach { model.play(at: $0) }
 
         XCTAssertEqual(model.winner, .x)
-        XCTAssertEqual(model.winningLine, [0, 1, 2])
+        XCTAssertEqual(model.winningCells, [0, 1, 2])
         XCTAssertEqual(model.xScore, 1)
 
         model.newRound()
@@ -123,6 +133,64 @@ final class GameRulesTests: XCTestCase {
         XCTAssertEqual(model.xScore, 0)
         XCTAssertEqual(model.oScore, 0)
         XCTAssertEqual(model.draws, 0)
+    }
+
+    @MainActor
+    func testOneMoveCompletingTwoLinesReportsEveryWinningCell() {
+        let model = GameModel()
+        model.mode = .twoPlayer
+
+        // X takes 1, 3, 5, 7 and then 4, completing both (3,4,5) and (1,4,7).
+        [1, 0, 3, 2, 5, 6, 7, 8, 4].forEach { model.play(at: $0) }
+
+        XCTAssertEqual(model.winner, .x)
+        XCTAssertEqual(model.winningCells, [1, 3, 4, 5, 7])
+    }
+
+    @MainActor
+    func testSwitchingModeKeepsTheScoreButStartsANewRound() {
+        let model = GameModel()
+        model.mode = .twoPlayer
+        [0, 3, 1, 4, 2].forEach { model.play(at: $0) }
+        XCTAssertEqual(model.xScore, 1)
+
+        model.mode = .computer
+
+        XCTAssertEqual(model.xScore, 1, "Switching mode must not wipe the scoreboard")
+        XCTAssertEqual(model.oScore, 0)
+        XCTAssertEqual(model.draws, 0)
+        XCTAssertEqual(model.board, Array<Mark?>(repeating: nil, count: 9))
+        XCTAssertEqual(model.currentTurn, .x)
+        XCTAssertNil(model.winner)
+    }
+
+    @MainActor
+    func testComputerMoveIsDelayedCancellableAndVisible() async throws {
+        let model = GameModel(computerMoveDelay: .milliseconds(50))
+        model.mode = .computer
+        model.difficulty = .easy
+
+        model.play(at: 0)
+
+        XCTAssertEqual(model.moveCount, 1, "The computer must not reply synchronously")
+        XCTAssertTrue(model.isComputerThinking)
+        XCTAssertEqual(model.statusText, "Computer is thinking")
+
+        try await Task.sleep(for: .milliseconds(400))
+        XCTAssertEqual(model.moveCount, 2, "The computer should have replied")
+        XCTAssertFalse(model.isComputerThinking)
+        XCTAssertEqual(model.statusText, "Your turn")
+
+        // Starting a new round must cancel a move that is still pending.
+        let emptyCell = try XCTUnwrap(model.board.firstIndex(of: nil))
+        model.play(at: emptyCell)
+        XCTAssertTrue(model.isComputerThinking)
+
+        model.newRound()
+        try await Task.sleep(for: .milliseconds(400))
+
+        XCTAssertEqual(model.moveCount, 0, "A cancelled computer move must not land on the new board")
+        XCTAssertFalse(model.isComputerThinking)
     }
 
     @MainActor
